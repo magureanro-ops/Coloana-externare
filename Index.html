@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pachet complet — Pacienți internați continuu și operați</title>
+<script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body class="bg-slate-100 text-slate-900 font-[Inter] min-h-screen">
+
+<!-- ═══════════ HEADER ═══════════ -->
+<header class="bg-slate-900 text-white sticky top-0 z-40 shadow-lg print:hidden">
+  <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-sky-500 flex items-center justify-center text-xl">🩺</div>
+      <div>
+        <h1 class="text-base font-bold leading-tight">Chirurgie Coloană Vertebrală</h1>
+        <p class="text-xs text-slate-300">Pachet complet — internare continuă + intervenție + externare</p>
+      </div>
+    </div>
+    <div class="ml-auto flex flex-wrap items-center gap-2">
+      <button data-action="seed" class="btn-ghost">Exemplu</button>
+      <button data-action="export" class="btn-ghost">Export JSON</button>
+      <button data-action="import" class="btn-ghost">Import</button>
+      <input type="file" id="importFile" accept="application/json" class="hidden">
+      <button data-action="print" class="btn-ghost">🖨️ Print</button>
+      <span id="storageBadge" class="text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300"></span>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════ CORP PRINCIPAL ═══════════ -->
+<div class="max-w-7xl mx-auto px-4 py-6 grid grid-cols-12 gap-6">
+
+  <!-- ───── SIDEBAR (lista pacienți) ───── -->
+  <aside class="col-span-12 lg:col-span-3 print:hidden">
+    <div class="bg-white rounded-2xl shadow-sm p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-bold text-sm text-slate-700">Pacienți</h2>
+        <button data-action="newPacient" class="bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold rounded-lg px-3 py-1.5 flex items-center gap-1">
+          <img src="https://unpkg.com/lucide-static@1.44.0/icons/plus.svg" class="w-3.5 h-3.5" alt=""> Nou
+        </button>
+      </div>
+      <div class="relative mb-3">
+        <img src="https://unpkg.com/lucide-static@1.44.0/icons/search.svg" class="w-4 h-4 absolute left-3 top-2.5 opacity-40" alt="">
+        <input id="searchPacient" type="text" placeholder="Caută nume / CNP..."
+               class="w-full pl-9 pr-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300">
+      </div>
+      <div id="pacientList" class="space-y-2 max-h-[70vh] overflow-y-auto pr-1"></div>
+    </div>
+  </aside>
+
+  <!-- ───── ZONA PRINCIPALĂ ───── -->
+  <main class="col-span-12 lg:col-span-9">
+
+    <!-- Ecran gol: niciun pacient selectat -->
+    <div id="emptyState" class="bg-white rounded-2xl shadow-sm p-10 text-center hidden">
+      <div class="text-5xl mb-3">📋</div>
+      <h2 class="text-lg font-bold text-slate-700">Selectează un pacient sau creează o internare nouă</h2>
+      <p class="text-sm text-slate-500 mt-1">Pachetul complet pentru internare continuă și intervenție chirurgicală.</p>
+      <div class="flex justify-center gap-3 mt-6">
+        <button data-action="newPacient" class="btn-primary">+ Pacient & Internare nouă</button>
+      </div>
+    </div>
+
+    <!-- Detaliu pacient (randat dinamic) -->
+    <div id="detailView" class="hidden"></div>
+  </main>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   PACHET COMPLET — PACIENTI INTERNATI CONTINUU SI OPERATI
+   Aplicatie autonomă (single-file) cu UARE locală + export/import.
+   Următorul pas de integrare cu MySQL: backend PHP (config.php +
+   api/*.php) care scrie în tabelele bd_externari_coloana.
+   ═══════════════════════════════════════════════════════════════ */
+
+const $ = id => document.getElementById(id);
+let DB = null;
+let storageOK = true;
+let currentPacient = null;
+let currentTab = 'internare';
+
+/* ── Cataloage (identice cu lookup-urile din baza MySQL) ── */
+const DIAGNOSTICE = [
+  {cod:'M51.2', nume:'Hernie de disc lombară (deplasare)'},
+  {cod:'M50.1', nume:'Tulburare de disc cervical cu radiculopatie'},
+  {cod:'M48.06', nume:'Stenoza de canal lombar'},
+  {cod:'M43.16', nume:'Spondilolisteză lombară'},
+  {cod:'M41.1', nume:'Scolioză idiopatică adolescentină'},
+  {cod:'M46.4', nume:'Spondilodiscită'},
+  {cod:'C41.2', nume:'Tumora malignă primară a coloanei'},
+  {cod:'C79.5', nume:'Metastaze osoase secundare ale coloanei'},
+  {cod:'S12.9', nume:'Fractură de coloană cervicală'},
+  {cod:'S22.0', nume:'Fractură de vertebra toracală'},
+  {cod:'S32.0', nume:'Fractură de vertebra lombară'}
+];
+const PROCEDURI = [
+  {cod:'80.53', nume:'Discectomie lombară (minim invaziv)'},
+  {cod:'81.02', nume:'Fuziune cervicală anterioară (ACDF)'},
+  {cod:'03.09', nume:'Laminectomie decompresivă'},
+  {cod:'81.08', nume:'Fuziune lombară posterioară cu instrumentație'},
+  {cod:'81.05', nume:'Fuziune toraco-lombară posterioară'},
+  {cod:'81.65', nume:'Vertebroplastie percutanată'},
+  {cod:'81.66', nume:'Kyfoplastie percutanată'}
+];
+const IMPLANTE = [
+  'Șurub pedicular poliaxial titan','Tijă longitudinală titan','Cage PEEK lordotic',
+  'Cage titan trabecular (3D)','Cage expandabil lombar','Cage cervical box',
+  'Placă cervicală anterioară','Proteză de disc lombară','Proteză de disc cervicală',
+  'Grefă osoasă autologă','Substitut osos sintetic (β-TCP)','BMP-2','Ciment osos PMMA'
+];
+const MEDICAMENTE = [
+  'Paracetamol','Ibuprofen','Diclofenac','Tramadol','Oxycodon','Pregabalin','Gabapentin',
+  'Thiocolchicosid','Enoxaparin','Rivaroxaban','Omeprazol','Pantoprazol',
+  'Amoxicilină/Acid clavulanic','Ciprofloxacin','Rifampicină','Ceftriaxonă',
+  'Colecalciferol (Vitamina D3)','Carbonat de calciu','Alendronat','Dexametazonă'
+];
+const DESTINATII = [
+  'Domiciliu','Domiciliu cu îngrijiri medicale','Centru de recuperare medicală',
+  'Transfer la alt spital','Transfer ATI','Externare la cerere (AMA)'
+];
+const CRITERII = [
+  'Afebril ≥ 24–48h','Durere controlată cu analgezice orale (SVA ≤ 3–4)',
+  'Mobilizare activă permisă și tolerată','Micțiune spontană prezentă',
+  'Tranzit intestinal prezent','Plagă operatorie uscată, fără semne inflamatorii',
+  'Radiografie de control cu instrumentație','Profilaxie tromboembolică stabilită',
+  'Educația pacientului: semne de alarmă','Suport socio-familial adecvat',
+  'Consult de control programat (2–6 săptămâni)'
+];
+const ODI_ITEMS = [
+  ['Intensitatea durerii',['Nu am durere','Durere ușoară','Durere moderată','Durere severă','Durere foarte severă','Durere insuportabilă']],
+  ['Îngrijirea personală',['Normal, fără durere','Normal, dar cu durere','Am nevoie de ajutor','Am nevoie de ajutor la majoritatea acțiunilor','Am nevoie de ajutor pentru toate','Nu pot să mă îngrijesc']],
+  ['Ridicarea greutăților',['Pot ridica greutăți mari fără durere','Pot ridica greutăți mari, dar cu durere','Durerea mă împiedică să ridic greutăți mari de pe podea','Durerea mă împiedică să ridic greutăți de pe podea','Pot ridica doar greutăți foarte mici','Nu pot ridica sau duce nimic']],
+  ['Mersul',['Pot merge oricât de departe','Pot merge până la 1 km','Pot merge până la 500 m','Pot merge doar 100 m','Merg doar cu baston/cârjă','Sunt imobilizat la pat']],
+  ['Statul jos',['Pot sta pe orice scaun cât vreau','Pot sta pe scaunul meu preferat cât vreau','Pot sta jos maximum 1 oră','Pot sta jos maximum 30 minute','Pot sta jos maximum 10 minute','Nu pot sta jos deloc']],
+  ['Statul în picioare',['Pot sta în picioare cât vreau fără durere','Pot sta în picioare cât vreau, dar cu durere','Pot sta în picioare maximum 1 oră','Pot sta în picioare maximum 30 minute','Pot sta în picioare maximum 10 minute','Nu pot sta în picioare deloc']],
+  ['Somnul',['Somnul nu este afectat','Somnul este ușor afectat','Somnul este moderat afectat','Somnul este puternic afectat','Somnul este foarte puternic afectat','Nu pot dormi deloc din cauza durerii']],
+  ['Viața socială',['Viața socială normală','Viața socială normală, dar cu durere','Viața socială nu este afectată semnificativ','Durerea limitează viața socială','Durerea îmi limitează sever viața socială','Nu am viață socială din cauza durerii']],
+  ['Călătoriile',['Pot călători oriunde fără durere','Pot călători oriunde, dar cu durere','Pot călători maximum 2 ore','Pot călători maximum 1 oră','Pot călători doar distanțe scurte < 30 minute','Nu pot călători deloc']],
+  ['Gradul de schimbare',['Situația mea nu s-a schimbat','Situația s-a schimbat foarte puțin','Situația s-a schimbat mult','Situația s-a schimbat foarte mult','Situația s-a schimbat extrem de mult','Sunt în cea mai proastă perioadă a vieții mele']]
+];
+
+/* ── Persistență (localStorage cu try/catch) ── */
+function defaultDB(){
+  return {
+    pacienti: [], internari: [], rapoarte: [], consimtaminte: [],
+    evolutii: [], prescrieri: [], epicrize: [], urmariri: [],
+    seq: { pacienti:1, internari:1, rapoarte:1, consimtaminte:1, evolutii:1, prescrieri:1, epicrize:1 }
+  };
+}
+function save(){
+  const badge = $('storageBadge');
+  try {
+    localStorage.setItem('pachet_complet_coloana', JSON.stringify(DB));
+    storageOK = true;
+    badge.textContent = '✓ salvat local';
+    badge.className = 'text-xs px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-300';
+  } catch(e) {
+    storageOK = false;
+    badge.textContent = '⚠ stocare indisponibilă (in-memory)';
+    badge.className = 'text-xs px-2 py-1 rounded-full bg-amber-500/20 text-amber-300';
+  }
+}
+function load(){
+  try {
+    const raw = localStorage.getItem('pachet_complet_coloana');
+    if(raw) DB = JSON.parse(raw);
+  } catch(e){ DB = null; }
+  if(!DB) DB = defaultDB();
+}
+
+/* ── Helperi utilitari ── */
+const nextId = k => DB.seq[k]++;
+function getPacient(id){ return DB.pacienti.find(p => p.id === id); }
+function getInternareDePacient(id){ return DB.internari.find(i => i.idPacient === id); }
+function getRaport(idInternare){ return DB.rapoarte.find(r => r.idInternare === idInternare); }
+function getConsimtaminte(idInternare){ return DB.consimtaminte.find(c => c.idInternare === idInternare); }
+function getEpicriza(idInternare){ return DB.epicrize.find(e => e.idInternare === idInternare); }
+function getEvolutii(idInternare){ return DB.evolutii.filter(e => e.idInternare === idInternare).sort((a,b)=>a.ziua-b.ziua); }
+function getPrescrieri(idInternare){ return DB.prescrieri.filter(p => p.idInternare === idInternare); }
+function statusInternare(id){
+  const i = DB.internari.find(x => x.id === id);
+  if(!i) return '—';
+  if(getEpicriza(id)) return 'Externat';
+  if(getRaport(id)) return 'Postoperator';
+  return 'Internat';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RANDARE
+   ═══════════════════════════════════════════════════════════════ */
+function renderPacientList(){
+  const q = ($('searchPacient')\vert \vert {}).value ? $('searchPacient').value.toLowerCase() : '';
+  const list = DB.pacienti
+    .filter(p => !q || (p.nume+' '+p.prenume+' '+p.cnp).toLowerCase().includes(q))
+    .sort((a,b) => b.id - a.id);
+  const html = list.map(p => {
+    const int = getInternareDePacient(p.id);
+    const st = int ? statusInternare(int.id) : 'Fără internare';
+    const stCls = st === 'Externat' ? 'bg-slate-200 text-slate-600'
+                 : st === 'Postoperator' ? 'bg-sky-100 text-sky-700'
+                 : st === 'Internat' ? 'bg-emerald-100 text-emerald-700'
+                 : 'bg-slate-100 text-slate-500';
+    return `
+    <div data-pid="${p.id}" class="pacient-card cursor-pointer rounded-xl border border-slate-200 p-3 hover:border-sky-400 hover:shadow-md transition ${currentPacient===p.id?'ring-2 ring-sky-400 border-transparent':''}">
+      <div class="flex items-start justify-between gap-2">
+        <div>
+          <p class="font-semibold text-sm">${p.nume} ${p.prenume}</p>
+          <p class="text-xs text-slate-500">${p.cnp\vert \vert '—'} · ${p.varsta||''} ani</p>
+        </div>
+        <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${stCls}">${st}</span>
+      </div>
+      <p class="text-xs text-slate-500 mt-1 truncate">${int ? int.diagnosticNume : '—'}</p>
+    </div>`;
+  }).join('');
+  $('pacientList').innerHTML = html || '<p class="text-sm text-slate-400 text-center py-6">Niciun pacient.</p>';
+}
+
+function renderEmptyState(){ $('emptyState').classList.remove('hidden'); $('detailView').classList.add('hidden'); }
+function renderDetail(){
+  $('emptyState').classList.add('hidden');
+  $('detailView').classList.remove('hidden');
+  const p = getPacient(currentPacient);
+  if(!p) return renderEmptyState();
+  const int = getInternareDePacient(p.id);
+  if(!int){ renderNewInternareForm(p); return; }
+  renderPacientLayout(p, int);
+}
+
+/* ── Formular pacient nou ── */
+function renderNewPacientForm(){
+  $('emptyState').classList.add('hidden');
+  $('detailView').classList.remove('hidden');
+  $('detailView').innerHTML = `
+  <div class="bg-white rounded-2xl shadow-sm p-6 max-w-2xl">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="text-lg font-bold">Pacient nou</h2>
+      <button data-action="back" class="btn-ghost">← Înapoi</button>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="lbl">Nume *</label><input id="fNume" class="inp" placeholder="Nume"></div>
+      <div><label class="lbl">Prenume *</label><input id="fPrenume" class="inp" placeholder="Prenume"></div>
+      <div><label class="lbl">CNP</label><input id="fCnp" class="inp" maxlength="13" placeholder="13 cifre"></div>
+      <div><label class="lbl">Data nașterii</label><input id="fDataN" type="date" class="inp"></div>
+      <div><label class="lbl">Sex</label>
+        <select id="fSex" class="inp"><option>F</option><option>M</option></select></div>
+      <div><label class="lbl">Telefon</label><input id="fTel" class="inp" placeholder="07xx xxx xxx"></div>
+      <div class="col-span-2"><label class="lbl">Adresă</label><input id="fAdresa" class="inp"></div>
+      <div class="col-span-2"><label class="lbl">Antecedente / comorbidități</label><textarea id="fAnt" class="inp" rows="2"></textarea></div>
+      <div class="col-span-2"><label class="lbl">Alergii</label><input id="fAlergii" class="inp"></div>
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button data-action="savePacient" class="btn-primary">Salvează pacientul</button>
+    </div>
+  </div>`;
+}
+
+function renderNewInternareForm(p){
+  $('emptyState').classList.add('hidden');
+  $('detailView').classList.remove('hidden');
+  const dgOpts = DIAGNOSTICE.map(d => `<option value="${d.cod}">${d.cod} — ${d.nume}</option>`).join('');
+  $('detailView').innerHTML = `
+  <div class="bg-white rounded-2xl shadow-sm p-6 max-w-2xl">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-lg font-bold">Internare nouă — ${p.nume} ${p.prenume}</h2>
+      <button data-action="back" class="btn-ghost">← Înapoi</button>
+    </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div><label class="lbl">Data internării</label><input id="iData" type="date" class="inp" value="${todayStr()}"></div>
+      <div><label class="lbl">Tip internare</label><input class="inp" value="Continuu" readonly class="bg-slate-100"></div>
+      <div class="col-span-2"><label class="lbl">Diagnostic (ICD-10) *</label>
+        <select id="iDiag" class="inp">${dgOpts}</select></div>
+      <div class="col-span-2"><label class="lbl">Motivul internării / istoric</label><textarea id="iMotiv" class="inp" rows="3"></textarea></div>
+      <div class="col-span-2"><label class="lbl">Intervenție planificată</label>
+        <select id="iProcedura" class="inp">${PROCEDURI.map(x=>`<option value="${x.cod}">${x.cod} — ${x.nume}</option>`).join('')}</select></div>
+      <div><label class="lbl">Segment țintă (ex: L4-L5)</label><input id="iSegment" class="inp" placeholder="ex: L4-L5"></div>
+      <div><label class="lbl">Număr nivele</label><input id="iNivele" type="number" min="1" max="20" class="inp"></div>
+    </div>
+    <div class="flex gap-3 mt-6">
+      <button data-action="saveInternare" class="btn-primary">Salvează internarea</button>
+    </div>
+  </div>`;
+}
+
+/* ── Layout principal pacient: header + taburi ── */
+function renderPacientLayout(p, int){
+  const tabs = [
+    ['internare','Internare','file-text'],
+    ['preoperator','Preoperator','clipboard-list'],
+    ['operator','Raport operator','stethoscope'],
+    ['postoperator','Postoperator','activity'],
+    ['tratament','Tratament','pill'],
+    ['externare','Externare','calendar']
+  ];
+  const tabHtml = tabs.map(([k,label,icon]) => `
+    <button data-tab="${k}" class="px-4 py-2 text-sm font-medium rounded-xl transition flex items-center gap-2 ${currentTab===k?'bg-sky-600 text-white shadow':'text-slate-600 hover:bg-slate-100'}">
+      <img src="https://unpkg.com/lucide-static@1.44.0/icons/${icon}.svg" class="w-4 h-4 ${currentTab===k?'invert':''}" alt="">
+      ${label}
+    </button>`).join('');
+
+  $('detailView').innerHTML = `
+  <div class="space-y-4">
+    <!-- Card pacient -->
+    <div class="bg-white rounded-2xl shadow-sm p-5 print:hidden">
+      <div class="flex flex-wrap items-center gap-4">
+        <div class="w-14 h-14 rounded-full bg-sky-100 text-sky-700 flex items-center justify-center text-2xl font-bold">
+          ${initiale(p.nume,p.prenume)}
+        </div>
+        <div class="mr-auto">
+          <h2 class="text-lg font-bold">${p.nume} ${p.prenume}</h2>
+          <p class="text-sm text-slate-500">CNP ${p.cnp\vert \vert '—'} · ${p.varsta||''} ani · ${p.sex\vert \vert ''} · ${p.telefon||''}</p>
+          <p class="text-xs text-slate-400 mt-0.5">${p.adresa\vert \vert ''} ${p.antecedente?'· Anex: '+p.antecedente:''}</p>
+        </div>
+        <span class="text-xs font-bold px-3 py-1.5 rounded-full bg-emerald-100 text-emerald-700">INTERNARE CONTINUĂ</span>
+        <button data-action="back" class="btn-ghost">← Listă</button>
+      </div>
+      <div class="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+        ${tabHtml}
+      </div>
+    </div>
+
+    <!-- Conținut tab -->
+    <div class="bg-white rounded-2xl shadow-sm p-6" id="tabContent"></div>
+
+    <!-- Zonă print (epicriza/bilet) -->
+    <div id="printArea" class="hidden print:block bg-white rounded-2xl p-8"></div>
+  </div>`;
+
+  document.querySelectorAll('[data-tab]').forEach(btn => btn.addEventListener('click', e => {
+    currentTab = e.currentTarget.dataset.tab;
+    renderTabContent(p, int);
+  }));
+  renderTabContent(p, int);
+}
+
+/* ── Render conținut tab activ ── */
+function renderTabContent(p, int){
+  const el = $('tabContent');
+  switch(currentTab){
+    case 'internare': el.innerHTML = tabInternare(p, int); break;
+    case 'preoperator': el.innerHTML = tabPreoperator(p, int); break;
+    case 'operator': el.innerHTML = tabOperator(p, int); break;
+    case 'postoperator': el.innerHTML = tabPostoperator(p, int); break;
+    case 'tratament': el.innerHTML = tabTratament(p, int); break;
+    case 'externare': el.innerHTML = tabExternare(p, int); break;
+  }
+  attachTabListeners(int);
+}
+
+/* ── TAB Internare ── */
+function tabInternare(p, int){
+  const dg = DIAGNOSTICE.find(d => d.cod === int.diagnosticCod);
+  return `
+  <h3 class="text-base font-bold mb-4">Fișă de internare</h3>
+  <div class="grid grid-cols-2 gap-4 text-sm">
+    <div><span class="text-slate-500">Data internării:</span> <b>${int.dataInternare}</b></div>
+    <div><span class="text-slate-500">Tip internare:</span> <b>Continuu</b></div>
+    <div class="col-span-2"><span class="text-slate-500">Diagnostic ICD-10:</span> <b>${int.diagnosticCod} — ${dg?dg.nume:int.diagnosticNume}</b></div>
+    <div class="col-span-2"><span class="text-slate-500">Intervenție planificată:</span> <b>${int.proceduraNume}</b></div>
+    <div><span class="text-slate-500">Segment țintă:</span> <b>${int.segment||'—'}</b></div>
+    <div><span class="text-slate-500">Nivele:</span> <b>${int.nivele||'—'}</b></div>
+    <div class="col-span-2"><span class="text-slate-500">Motivul internării / istoric:</span><p class="mt-1 text-slate-700 bg-slate-50 rounded-xl p-3">${int.motiv||'—'}</p></div>
+  </div>
+  <div class="mt-5 flex gap-2">
+    <button data-action="editInternare" class="btn-secondary">✏️ Editează</button>
+  </div>`;
+}
+
+/* ── TAB Preoperator ── */
+function tabPreoperator(p, int){
+  const c = getConsimtaminte(int.id) || {};
+  const rap = getRaport(int.id);
+  return `
+  <h3 class="text-base font-bold mb-5">Consult preoperator & pregătire</h3>
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div class="border border-slate-200 rounded-2xl p-4">
+      <h4 class="font-semibold text-sm mb-3 text-slate-700">Evaluare risc anestezic</h4>
+      <label class="lbl">Clasificare ASA</label>
+      <select data-field="asa" class="inp mb-3">
+        ${[1,2,3,4,5].map(x=>`<option ${c.asa==x?'selected':''}>ASA ${x}</option>`).join('')}
+      </select>
+      <label class="lbl">Intensitatea durerii (SVA 0–10)</label>
+      <input data-field="sva" type="range" min="0" max="10" value="${c.sva??5}" class="w-full accent-sky-600">
+      <p class="text-2xl font-bold text-sky-700 text-center mt-1">${c.sva??5}/10</p>
+    </div>
+
+    <div class="border border-slate-200 rounded-2xl p-4">
+      <h4 class="font-semibold text-sm mb-3 text-slate-700">Consimțământ informat</h4>
+      <div class="text-sm space-y-3">
+        <label class="flex items-center gap-2"><input type="checkbox" data-field="consChir" class="w-4 h-4 accent-sky-600" ${c.consChir?'checked':''}> Chirurgical — semnat</label>
+        <label class="flex items-center gap-2"><input type="checkbox" data-field="consAnest" class="w-4 h-4 accent-sky-600" ${c.consAnest?'checked':''}> Anestezic — semnat</label>
+        <div><label class="lbl mt-2">Data semnării</label><input type="date" data-field="consData" class="inp" value="${c.consData||''}"></div>
+        <div><label class="lbl">Observații</label><textarea data-field="consObs" class="inp" rows="2">${c.consObs||''}</textarea></div>
+      </div>
+    </div>
+
+    <div class="md:col-span-2 border border-slate-200 rounded-2xl p-4">
+      <h4 class="font-semibold text-sm mb-3 text-slate-700">Scor Oswestry Disability Index (ODI)</h4>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+        ${ODI_ITEMS.map((item, idx) => `
+          <div>
+            <p class="text-xs font-semibold text-slate-600 mb-1">${idx+1}. ${item[0]}</p>
+            <select data-odi="${idx}" class="inp text-sm">${item[1].map((opt,i)=>`<option value="${i}" ${c.odi&&c.odi[idx]==i?'selected':''}>${opt}</option>`).join('')}</select>
+          </div>`).join('')}
+      </div>
+      <div class="mt-4 flex items-center gap-4 bg-sky-50 rounded-xl p-4">
+        <span class="font-bold text-xl text-sky-800" id="odiVal">${calcODI(c.odi)}%</span>
+        <span class="text-sm text-sky-700" id="odiInterp">${odiInterp(calcODI(c.odi))}</span>
+      </div>
+    </div>
+  </div>
+  <div class="mt-5 text-xs text-slate-400">Modificările se salvează automat.</div>`;
+}
+
+function calcODI(odi){
+  if(!odi || !Array.isArray(odi)) return 0;
+  const sum = odi.reduce((a,b)=>a+(parseInt(b)||0),0);
+  return Math.round(sum/50*100);
+}
+function odiInterp(v){
+  if(v<=20) return 'Dizabilitate minimă';
+  if(v<=40) return 'Dizabilitate moderată';
+  if(v<=60) return 'Dizabilitate severă';
+  if(v<=80) return 'Dizabilitate foarte severă (crippling)';
+  return 'Imobilizat / invaliditate maximă';
+}
+
+/* ── TAB Raport operator ── */
+function tabOperator(p, int){
+  const r = getRaport(int.id) || {};
+  const compOpts = [
+    'Leziune duraiă / fistulă LCR','Hematom epidural','Infecție de plagă','Serom / limforagie',
+    'Malpoziție implant','TVP / Embolie pulmonară','Infecție urinară','Pneumonie',
+    'Ileus paralitic','Anemie / hipotensiune','Retenție urinară','Deficit motor nou apărut'
+  ];
+  return `
+  <h3 class="text-base font-bold mb-5">Raport operator</h3>
+  <div class="grid grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+    <div><label class="lbl">Data intervenției</label><input data-field="data" type="date" class="inp" value="${r.data||todayStr()}"></div>
+    <div><label class="lbl">Ora</label><input data-field="ora" type="time" class="inp" value="${r.ora||''}"></div>
+    <div><label class="lbl">Chirurg principal</label><input data-field="chirurg" class="inp" value="${r.chirurg||''}" placeholder="Dr. ..."></div>
+    <div><label class="lbl">Asistenți</label><input data-field="asistenti" class="inp" value="${r.asistenti||''}"></div>
+    <div><label class="lbl">Tip anestezie</label>
+      <select data-field="anestezie" class="inp">${['Generala','Regionala','Locala','Sedo-analgezie'].map(a=>`<option ${r.anestezie==a?'selected':''}>${a}</option>`).join('')}</select></div>
+    <div><label class="lbl">Abord</label>
+      <select data-field="abord" class="inp">${['Deschis','Minim invaziv','Percutanat'].map(a=>`<option ${r.abord==a?'selected':''}>${a}</option>`).join('')}</select></div>
+    <div><label class="lbl">Segment intervenție</label><input data-field="segment" class="inp" value="${r.segment||int.segment||''}" placeholder="ex: L4-S1"></div>
+    <div><label class="lbl">Număr nivele</label><input data-field="nivele" type="number" min="1" class="inp" value="${r.nivele||int.nivele||''}"></div>
+    <div><label class="lbl">Durată (minute)</label><input data-field="durata" type="number" class="inp" value="${r.durata||''}"></div>
+    <div><label class="lbl">Pierdere sânge (ml)</label><input data-field="sange" type="number" class="inp" value="${r.sange||''}"></div>
+    <div class="col-span-2 lg:col-span-1"><label class="lbl">Probe pentru anatomo-patologic</label><input data-field="probe" class="inp" value="${r.probe||''}"></div>
+
+    <div class="col-span-2"><label class="lbl">Implanturi folosite</label>
+      <div class="grid grid-cols-2 lg:grid-cols-3 gap-2 mt-1">
+        ${IMPLANTE.map(imp=>`
+          <label class="flex items-center gap-2 text-xs rounded-xl border border-slate-200 px-3 py-2 ${(r.implanturi||[]).includes(imp)?'border-sky-400 bg-sky-50':'hover:border-slate-300'}">
+            <input type="checkbox" data-implant="${imp}" class="w-4 h-4 accent-sky-600" ${(r.implanturi||[]).includes(imp)?'checked':''}> ${imp}
+          </label>`).join('')}
+      </div></div>
+
+    <div class="col-span-2"><label class="lbl">Complicații intraoperatorii</label>
+      <div class="grid grid-cols-2 lg:grid-cols-3 gap-2 mt-1">
+        ${compOpts.map(c=>`
+          <label class="flex items-center gap-2 text-xs rounded-xl border border-slate-200 px-3 py-2 ${(r.complicatii||[]).includes(c)?'border-rose-300 bg-rose-50':'hover:border-slate-300'}">
+            <input type="checkbox" data-complicatie="${c}" class="w-4 h-4 accent-rose-500" ${(r.complicatii||[]).includes(c)?'checked':''}> ${c}
+          </label>`).join('')}
+      </div></div>
+
+    <div class="col-span-2"><label class="lbl">Descriere tehnică</label><textarea data-field="descriere" class="inp" rows="4" placeholder="Etapele intervenției, tehnica, materiale...">${r.descriere||''}</textarea></div>
+  </div>
+  <div class="mt-4 text-xs text-slate-400">Modificările se salvează automat.</div>`;
+}
+
+/* ── TAB Postoperator ── */
+function tabPostoperator(p, int){
+  const evol = getEvolutii(int.id);
+  const rows = evol.map(e => `
+    <div class="border border-slate-200 rounded-xl p-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm">
+      <span class="font-bold text-sky-700">Zi ${e.ziua}</span>
+      <span class="text-slate-500 text-xs">${e.data}</span>
+      <span>SVA <b>${e.sva??'-'}</b>/10</span>
+      <span>Febră <b>${e.febra?'Da':'Nu'}</b></span>
+      <span>Neurologic <b>${e.neurologic}</b></span>
+      <span>Plagă <b>${e.plaga}</b></span>
+      <span>Mobilizare <b>${e.mobilizare}</b></span>
+      <span>Micțiune <b>${e.mictiune?'spontană':'—'}</b></span>
+      <span>Tranzit <b>${e.tranzit?'prezent':'—'}</b></span>
+      <button data-action="delEvolutie" data-id="${e.id}" class="ml-auto text-rose-500 hover:text-rose-700"><img src="https://unpkg.com/lucide-static@1.44.0/icons/trash-2.svg" class="w-4 h-4" alt="șterge"></button>
+    </div>`).join('');
+
+  const nextZi = evol.length ? evol[evol.length-1].ziua + 1 : 0;
+  return `
+  <h3 class="text-base font-bold mb-4">Evoluție zilnică postoperatorie</h3>
+  ${evol.length ? `<div class="space-y-2 mb-6">${rows}</div>` : '<p class="text-sm text-slate-400 mb-4">Nicio notă zilnică încă.</p>'}
+  <div class="border-t border-slate-100 pt-4">
+    <h4 class="font-semibold text-sm mb-3 text-slate-700">Adaugă notă — Ziua ${nextZi}</h4>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+      <div><label class="lbl">Data</label><input id="eData" type="date" class="inp" value="${todayStr()}"></div>
+      <div><label class="lbl">SVA (0–10)</label><input id="eSva" type="number" min="0" max="10" value="3" class="inp"></div>
+      <div><label class="lbl">Febră</label><select id="eFebra" class="inp"><option>Nu</option><option>Da</option></select></div>
+      <div><label class="lbl">Status neurologic</label>
+        <select id="eNeuro" class="inp"><option>Normal / conservat</option><option>Ameliorat</option><option>Deficit nou apărut</option></select></div>
+      <div><label class="lbl">Plagă</label>
+        <select id="ePlaga" class="inp"><option>Uscată</option><option>Umedă</option><option>Secreție</option><option>Semne inflamatorii</option></select></div>
+      <div><label class="lbl">Mobilizare</label>
+        <select id="eMobil" class="inp"><option>La pat</option><option>Șezând</option><option>Cu ajutor</option><option>Independentă</option></select></div>
+      <div><label class="lbl">Micțiune spontană</label><select id="eMict" class="inp"><option>Da</option><option>Nu</option></select></div>
+      <div><label class="lbl">Tranzit intestinal</label><select id="eTranzit" class="inp"><option>Da</option><option>Nu</option></select></div>
+      <div class="col-span-2 lg:col-span-4"><label class="lbl">Notă liberă</label><textarea id="eNota" class="inp" rows="2" placeholder="Observații, medicație administrată, plan pe ziua următoare..."></textarea></div>
+    </div>
+    <button data-action="addEvolutie" class="btn-primary mt-4">+ Salvează nota zilei ${nextZi}</button>
+  </div>`;
+}
+
+/* ── TAB Tratament ── */
+function tabTratament(p, int){
+  const pr = getPrescrieri(int.id);
+  const rows = pr.map(x => `
+    <div class="border border-slate-200 rounded-xl p-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+      <span class="font-semibold">${x.medicament}</span>
+      <span class="text-slate-600">${x.doza} · ${x.frecventa}</span>
+      <span class="text-slate-400 text-xs">${x.cale} · ${x.durata}</span>
+      <span class="text-slate-500 text-xs">${x.indicatie}</span>
+      <button data-action="delPrescriere" data-id="${x.id}" class="ml-auto text-rose-500 hover:text-rose-700"><img src="https://unpkg.com/lucide-static@1.44.0/icons/trash-2.svg" class="w-4 h-4" alt="șterge"></button>
+    </div>`).join('');
+
+  return `
+  <h3 class="text-base font-bold mb-4">Tratament medicamentos</h3>
+  ${pr.length ? `<div class="space-y-2 mb-6">${rows}</div>` : '<p class="text-sm text-slate-400 mb-4">Nicio prescriere.</p>'}
+  <div class="border-t border-slate-100 pt-4">
+    <h4 class="font-semibold text-sm mb-3 text-slate-700">Prescriere nouă</h4>
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+      <div><label class="lbl">Medicament (DCI)</label>
+        <select id="prMed" class="inp">${MEDICAMENTE.map(m=>`<option>${m}</option>`).join('')}</select></div>
+      <div><label class="lbl">Doză</label><input id="prDoza" class="inp" placeholder="ex: 500 mg"></div>
+      <div><label class="lbl">Frecvență</label><input id="prFrec" class="inp" placeholder="ex: de 3 ori/zi"></div>
+      <div><label class="lbl">Cale</label>
+        <select id="prCale" class="inp"><option>oral</option><option>iv</option><option>sc</option><option>im</option><option>topical</option><option>transdermic</option></select></div>
+      <div><label class="lbl">Durată</label><input id="prDurata" class="inp" placeholder="ex: 7 zile"></div>
+      <div class="col-span-2"><label class="lbl">Indicație clinică</label><input id="prIndicatie" class="inp" placeholder="ex: profilaxie TVP"></div>
+    </div>
+    <button data-action="addPrescriere" class="btn-primary mt-4">+ Adaugă prescrierea</button>
+  </div>`;
+}
+
+/* ── TAB Externare ── */
+function tabExternare(p, int){
+  const ep = getEpicriza(int.id);
+  return `
+  <h3 class="text-base font-bold mb-4">Externare</h3>
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div>
+      <h4 class="font-semibold text-sm mb-3 text-slate-700">Date externare</h4>
+      <div class="grid grid-cols-2 gap-3 text-sm">
+        <div><label class="lbl">Data externării</label><input id="xData" type="date" class="inp" value="${ep?ep.dataExternare:todayStr()}"></div>
+        <div><label class="lbl">SVA la externare</label><input id="xSva" type="number" min="0" max="10" class="inp" value="${ep?ep.sva:2}"></div>
+        <div class="col-span-2"><label class="lbl">Destinație</label>
+          <select id="xDest" class="inp">${DESTINATII.map(d=>`<option ${ep&&ep.destinatie==d?'selected':''}>${d}</option>`).join('')}</select></div>
+        <div class="col-span-2"><label class="lbl">Recomandări / semne de alarmă</label><textarea id="xRecom" class="inp" rows="3">${ep?ep.recomandari:''}</textarea></div>
+      </div>
+      <h4 class="font-semibold text-sm mt-5 mb-2 text-slate-700">Checklist criterii de externare</h4>
+      <div class="space-y-1.5 text-sm">
+        ${CRITERII.map((c,i)=>`
+          <label class="flex items-center gap-2"><input type="checkbox" data-criteriu="${i}" class="w-4 h-4 accent-emerald-600" ${ep&&ep.criterii&&ep.criterii[i]?'checked':''}> ${c}</label>`).join('')}
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="border border-slate-200 rounded-2xl p-4">
+        <h4 class="font-semibold text-sm mb-2">Documente generate</h4>
+        <div class="flex flex-col gap-2">
+          <button data-action="genEpicriza" class="btn-secondary w-full">📄 Generează epicriza</button>
+          <button data-action="genBilet" class="btn-secondary w-full">📄 Generează biletul de externare</button>
+        </div>
+        <p class="text-xs text-slate-400 mt-2">Ambele documente sunt generate automat din datele structurate și pot fi editate.</p>
+      </div>
+      <div id="docButtons" class="space-y-2"></div>
+    </div>
+  </div>
+
+  <div id="epicrizaBox" class="mt-6"></div>
+  <div id="biletBox" class="mt-4"></div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   GENERARE DOCUMENTE (epicriza + bilet)
+   ═══════════════════════════════════════════════════════════════ */
+function genEpicrizaText(p, int, ep){
+  const r = getRaport(int.id) || {};
+  const c = getConsimtaminte(int.id) || {};
+  const evol = getEvolutii(int.id);
+  const pr = getPrescrieri(int.id);
+  const dg = DIAGNOSTICE.find(d => d.cod === int.diagnosticCod) || {nume:int.diagnosticNume};
+  const ultimaEvol = evol.length ? evol[evol.length-1] : null;
+
+  const tratInternare = [
+    'Antibioterapie profilactică perioperatorie (cefazolină 2 g i.v.)',
+    r.chirurg ? `Intervenție chirurgicală: ${int.proceduraNume}, ${r.segment||int.segment||''}, ${r.nivele\vert \vert int.nivele\vert \vert ''} nivel(ele), chirurg: ${r.chirurg}` : `Intervenție chirurgicală: ${int.proceduraNume}`,
+    r.durata ? `Durată operatorie: ${r.durata} minute; pierdere de sânge: ${r.sange||0} ml.` : null,
+    r.implanturi && r.implanturi.length ? `Implanturi folosite: ${r.implanturi.join(', ')}.` : null,
+    r.complicatii && r.complicatii.length ? `Complicații intraoperatorii: ${r.complicatii.join(', ')}.` : null,
+    c.asa ? `Risc anestezic ASA ${c.asa}.` : null,
+    'Analgezie parenterală perioperatorie; mobilizare precoce.'
+  ].filter(Boolean).join('\n');
+
+  const evolText = evol.length ? evol.map(e =>
+    `Ziua ${e.ziua} (${e.data}): SVA ${e.sva}/10, ${e.febra==='Da'?'febrilă':'afebrilă'}, status neurologic: ${e.neurologic}, plagă: ${e.plaga}, mobilizare: ${e.mobilizare}, micțiune spontană: ${e.mictiune==='Da'?'da':'nu'}, tranzit intestinal: ${e.tranzit==='Da'?'prezent':'absent'}. ${e.nota||''}`
+  ).join('\n') : 'Evoluție favorabilă, fără complicații.';
+
+  const medText = pr.length ? pr.map(m => `- ${m.medicament} ${m.doza}, ${m.frecventa}, ${m.cale}, ${m.durata} — ${m.indicatie}`).join('\n') : '- fără prescrieri';
+
+  const recom = ep && ep.recomandari ? ep.recomandari : `Control în Ambulatoriul de specialitate la 4 săptămâni. Semne de alarmă (febră, cefalee, deficit motor, tulburări sfincteriene) — prezentare imediată la camera de gardă.`;
+
+  return `EPICRIZĂ — ${p.nume} ${p.prenume}
+Data internării: ${int.dataInternare} \vert  Data externării: ${ep?ep.dataExternare:todayStr()} | Tip internare: continuu
+
+Diagnostic la internare: ${int.diagnosticCod} — ${dg.nume}
+Diagnostic la externare: idem
+
+Motivul internării: ${int.motiv||'—'}
+
+Antecedente: ${p.antecedente\vert \vert '—'} \vert  Alergii: ${p.alergii||'—'}
+
+Tratament efectuat în timpul internării:
+${tratInternare}
+
+Evoluția postoperatorie:
+${evolText}
+
+Starea la externare: SVA ${ep?ep.sva:2}/10; status neurologic conservat; plagă operatorie uscată.
+
+Recomandări la externare:
+${recom}
+
+Tratament la externare:
+${medText}
+
+Medic curant: ${ep?ep.medicCurant:''}`;
+}
+
+function genBiletText(p, int, ep){
+  const dg = DIAGNOSTICE.find(d => d.cod === int.diagnosticCod) || {nume:int.diagnosticNume};
+  const r = getRaport(int.id) || {};
+  const pr = getPrescrieri(int.id);
+  const medText = pr.length ? pr.map(m => `- ${m.medicament} ${m.doza}, ${m.frecventa}, ${m.cale}, ${m.durata} — ${m.indicatie}`).join('\n') : '- fără prescrieri';
+  return `BILET DE EXTERNARE
+Spitalul Clinic de Ortopedie și Traumatologie — Secția Chirurgie a Coloanei Vertebrale
+
+Datele pacientului: ${p.nume} ${p.prenume}, CNP ${p.cnp\vert \vert '—'}, ${p.varsta||''} ani, ${p.adresa||''}.
+
+Diagnostic la internare: ${int.diagnosticCod} — ${dg.nume}
+Diagnostic la externare: idem
+
+Intervenția chirurgicală: ${int.proceduraNume} — segment ${r.segment||int.segment||'—'}, ${r.nivele\vert \vert int.nivele\vert \vert '—'} nivel(ele). Implanturi: ${(r.implanturi||[]).join(', ')||'fără'}.
+
+Starea la externare: SVA ${ep?ep.sva:2}/10; ${ep?ep.statusFuncional:'status neurologic conservat'}.
+
+Recomandări la externare:
+${ep?ep.recomandari:''}
+
+Tratament la externare:
+${medText}
+
+Control: ${ep?ep.control:'la 4 săptămâni'}.
+Medic curant: ${ep?ep.medicCurant:''}`;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   EVENIMENTE & VALIDARE
+   ═══════════════════════════════════════════════════════════════ */
+function attachTabListeners(int){
+  const view = $('detailView');
+
+  /* Salvare automată câmpuri preoperator (ASA, SVA, ODI, consimțământ) */
+  view.querySelectorAll('[data-field]').forEach(el => el.addEventListener('change', e => {
+    const k = e.currentTarget.dataset.field;
+    let c = getConsimtaminte(int.id);
+    if(!c){ c = { idInternare: int.id }; DB.consimtaminte.push(c); }
+    if(k === 'sva') c.sva = parseInt(e.currentTarget.value);
+    else if(k === 'asa') c.asa = parseInt(e.currentTarget.value.replace(/\D/g,''));
+    else if(k === 'consChir') c.consChir = e.currentTarget.checked;
+    else if(k === 'consAnest') c.consAnest = e.currentTarget.checked;
+    else if(k === 'consData') c.consData = e.currentTarget.value;
+    else if(k === 'consObs') c.consObs = e.currentTarget.value;
+    save(); 
+  }));
+
+  view.querySelectorAll('[data-odi]').forEach(el => el.addEventListener('change', e => {
+    const idx = parseInt(e.currentTarget.dataset.odi);
+    let c = getConsimtaminte(int.id);
+    if(!c){ c = { idInternare: int.id }; DB.consimtaminte.push(c); }
+    if(!c.odi) c.odi = new Array(ODI_ITEMS.length).fill(0);
+    c.odi[idx] = parseInt(e.currentTarget.value);
+    const total = calcODI(c.odi);
+    const v = $('odiVal'); if(v) v.textContent = total + '%';
+    const i = $('odiInterp'); if(i) i.textContent = odiInterp(total);
+    save();
+  }));
+
+  /* Raport operator — salvare automată */
+  view.querySelectorAll('[data-field]').forEach(el => el.addEventListener('change', function(){
+    if(currentTab !== 'operator') return;
+    let r = getRaport(int.id);
+    if(!r){ r = { idInternare: int.id }; DB.rapoarte.push(r); }
+    const k = this.dataset.field;
+    if(['implanturi','complicatii'].includes(k)) return;
+    r[k] = this.value;
+    save();
+  }));
+  view.querySelectorAll('[data-implant]').forEach(el => el.addEventListener('change', function(){
+    let r = getRaport(int.id);
+    if(!r){ r = { idInternare: int.id }; DB.rapoarte.push(r); }
+    if(!r.implanturi) r.implanturi = [];
+    const imp = this.dataset.implant;
+    if(this.checked && !r.implanturi.includes(imp)) r.implanturi.push(imp);
+    else if(!this.checked) r.implanturi = r.implanturi.filter(x=>x!==imp);
+    save();
+  }));
+  view.querySelectorAll('[data-complicatie]').forEach(el => el.addEventListener('change', function(){
+    let r = getRaport(int.id);
+    if(!r){ r = { idInternare: int.id }; DB.rapoarte.push(r); }
+    if(!r.complicatii) r.complicatii = [];
+    const c = this.dataset.complicatie;
+    if(this.checked && !r.complicatii.includes(c)) r.complicatii.push(c);
+    else if(!this.checked) r.complicatii = r.complicatii.filter(x=>x!==c);
+    save();
+  }));
+
+  /* Criterii externare */
+  view.querySelectorAll('[data-criteriu]').forEach(el => el.addEventListener('change', function(){
+    let ep = getEpicriza(int.id);
+    if(!ep){ ep = { idInternare: int.id }; DB.epicrize.push(ep); }
+    if(!ep.criterii) ep.criterii = new Array(CRITERII.length).fill(false);
+    ep.criterii[parseInt(this.dataset.criteriu)] = this.checked;
+    save();
+  }));
+}
+
+/* ── Delegare globală butoane (action) ── */
+document.body.addEventListener('click', e => {
+  const btn = e.target.closest('[data-action]');
+  if(!btn) return;
+  const action = btn.dataset.action;
+  const id = btn.dataset.id;
+
+  switch(action){
+    case 'newPacient': currentPacient = null; renderNewPacientForm(); break;
+    case 'back': currentPacient = null; renderEmptyState(); renderPacientList(); break;
+    case 'savePacient': savePacient(); break;
+    case 'saveInternare': saveInternare(); break;
+    case 'editInternare': editInternare(); break;
+    case 'addEvolutie': addEvolutie(); break;
+    case 'delEvolutie': DB.evolutii = DB.evolutii.filter(x=>x.id!==parseInt(id)); save(); refresh(); break;
+    case 'addPrescriere': addPrescriere(); break;
+    case 'delPrescriere': DB.prescrieri = DB.prescrieri.filter(x=>x.id!==parseInt(id)); save(); refresh(); break;
+    case 'genEpicriza': genEpicrizaDoc(); break;
+    case 'genBilet': genBiletDoc(); break;
+    case 'seed': seedDemo(); break;
+    case 'export': exportJSON(); break;
+    case 'import': $('importFile').click(); break;
+    case 'print': doPrint(); break;
+  }
+});
+document.body.addEventListener('change', e => {
+  if(e.target && e.target.id === 'importFile') importJSON(e.target);
+});
+
+/* ── Acțiuni ── */
+function savePacient(){
+  const nume = $('fNume').value.trim(), prenume = $('fPrenume').value.trim();
+  if(!nume || !prenume){ alert('Numele și prenumele sunt obligatorii.'); return; }
+  const dataN = $('fDataN').value;
+  const varsta = dataN ? calcVarsta(dataN) : null;
+  const p = {
+    id: nextId('pacienti'), nume, prenume,
+    cnp: $('fCnp').value.trim(), dataNasterii: dataN, varsta,
+    sex: $('fSex').value, telefon: $('fTel').value.trim(),
+    adresa: $('fAdresa').value.trim(),
+    antecedente: $('fAnt').value.trim(), alergii: $('fAlergii').value.trim()
+  };
+  DB.pacienti.push(p);
+  save(); currentPacient = p.id;
+  renderPacientList(); renderNewInternareForm(p);
+}
+function saveInternare(){
+  const p = getPacient(currentPacient);
+  const diagCod = $('iDiag').value;
+  const dg = DIAGNOSTICE.find(d=>d.cod===diagCod);
+  const procCod = $('iProcedura').value;
+  const pr = PROCEDURI.find(x=>x.cod===procCod);
+  const int = {
+    id: nextId('internari'), idPacient: p.id,
+    dataInternare: $('iData').value, tip: 'Continuu',
+    diagnosticCod: diagCod, diagnosticNume: dg.nume,
+    proceduraCod: procCod, proceduraNume: pr.nume,
+    segment: $('iSegment').value.trim(), nivele: parseInt($('iNivele').value)||null,
+    motiv: $('iMotiv').value.trim()
+  };
+  DB.internari.push(int);
+  save(); currentTab = 'internare';
+  renderPacientList(); renderDetail();
+}
+function editInternare(){
+  const p = getPacient(currentPacient);
+  const int = getInternareDePacient(p.id);
+  if(!int) return;
+  DB.internari = DB.internari.filter(x=>x.id!==int.id);
+  save();
+  renderNewInternareForm(p);
+}
+function addEvolutie(){
+  const p = getPacient(currentPacient);
+  const int = getInternareDePacient(p.id);
+  const evol = getEvolutii(int.id);
+  const ziua = evol.length ? evol[evol.length-1].ziua + 1 : 0;
+  const nota = {
+    id: nextId('evolututii'), idInternare: int.id, ziua,
+    data: $('eData').value, sva: parseInt($('eSva').value)||0,
+    febra: $('eFebra').value, neurologic: $('eNeuro').value,
+    plaga: $('ePlaga').value, mobilizare: $('eMobil').value,
+    mictiune: $('eMict').value, tranzit: $('eTranzit').value,
+    nota: $('eNota').value.trim()
+  };
+  DB.evolutii.push(nota);
+  save(); renderDetail();
+}
+function addPrescriere(){
+  const p = getPacient(currentPacient);
+  const int = getInternareDePacient(p.id);
+  DB.prescrieri.push({
+    id: nextId('prescrieri'), idInternare: int.id,
+    medicament: $('prMed').value, doza: $('prDoza').value.trim(),
+    frecventa: $('prFrec').value.trim(), cale: $('prCale').value,
+    durata: $('prDurata').value.trim(), indicatie: $('prIndicatie').value.trim()
+  });
+  save(); renderDetail();
+}
+
+/* ── Generare documente ── */
+function genEpicrizaDoc(){
+  const p = getPacient(currentPacient);
+  const int = getInternareDePacient(p.id);
+  let ep = getEpicriza(int.id);
+  if(!ep){ ep = { idInternare: int.id }; DB.epicrize.push(ep); }
+  ep.dataExternare = $('xData').value || todayStr();
+  ep.sva = parseInt($('xSva').value)||2;
+  ep.destinatie = $('xDest').value;
+  ep.recomandari = $('xRecom').value.trim();
+  ep.control = 'în ' + (($('xRecom').value.match(/(\d+)\s*săptămâni/)||[])[1]||'4') + ' săptămâni';
+  ep.medicCurant = prompt('Medic curant:', 'Dr. ');
+  ep.text = genEpicrizaText(p, int, ep);
+  save(); renderDetail(); renderEpicrizaBox(ep);
+}
+function genBiletDoc(){
+  const p = getPacient(currentPacient);
+  const int = getInternareDePacient(p.id);
+  let ep = getEpicriza(int.id);
+  if(!ep){ ep = { idInternare: int.id }; DB.epicrize.push(ep); }
+  ep.dataExternare = $('xData').value || todayStr();
+  ep.sva = parseInt($('xSva').value)||2;
+  ep.destinatie = $('xDest').value;
+  ep.recomandari = $('xRecom').value.trim();
+  ep.medicCurant = ep.medicCurant || 'Dr. ';
+  ep.bilet = genBiletText(p, int, ep);
+  save(); renderDetail(); renderBiletBox(ep);
+}
+function renderEpicrizaBox(ep){
+  $('epicrizaBox').innerHTML = `
+    <div class="border border-sky-200 bg-sky-50/50 rounded-2xl p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="font-bold text-sm text-sky-800">📄 Epicriza (generată)</h4>
+        <span class="text-xs text-emerald-600 font-semibold">✓ salvată</span>
+      </div>
+      <textarea id="epText" rows="16" class="inp font-mono text-xs w-full">${ep.text||''}</textarea>
+      <div class="flex gap-2 mt-2">
+        <button data-action="saveEpText" class="btn-primary text-xs">Salvează editările</button>
+        <button onclick="window.print()" class="btn-secondary text-xs">🖨️ Tipărește</button>
+      </div>
+    </div>`;
+  $('detailView').querySelector('[data-action="saveEpText"]').addEventListener('click', ()=>{
+    const p = getPacient(currentPacient); const int = getInternareDePacient(p.id);
+    const ep = getEpicriza(int.id); ep.text = $('epText').value; save();
+    alert('Epicriza a fost actualizată.');
+  });
+}
+function renderBiletBox(ep){
+  $('biletBox').innerHTML = `
+    <div class="border border-slate-300 rounded-2xl p-4">
+      <div class="flex items-center justify-between mb-2">
+        <h4 class="font-bold text-sm text-slate-700">📄 Biletul de externare (generat)</h4>
+        <span class="text-xs text-emerald-600 font-semibold">✓ salvat</span>
+      </div>
+      <textarea id="biletText" rows="12" class="inp font-mono text-xs w-full">${ep.bilet||''}</textarea>
+      <div class="flex gap-2 mt-2">
+        <button data-action="saveBiletText" class="btn-primary text-xs">Salvează editările</button>
+        <button onclick="window.print()" class="btn-secondary text-xs">🖨️ Tipărește</button>
+      </div>
+    </div>`;
+  $('detailView').querySelector('[data-action="saveBiletText"]').addEventListener('click', ()=>{
+    const p = getPacient(currentPacient); const int = getInternareDePacient(p.id);
+    const ep = getEpicriza(int.id); ep.bilet = $('biletText').value; save();
+    alert('Biletul a fost actualizat.');
+  });
+}
+
+function doPrint(){
+  const p = getPacient(currentPacient);
+  if(!p){ alert('Selectează mai întâi un pacient.'); return; }
+  const int = getInternareDePacient(p.id);
+  const ep = getEpicriza(int.id);
+  const printContent = (ep && ep.text ? `<div class="p-8"><pre class="whitespace-pre-wrap font-[Inter] text-sm leading-relaxed">${ep.text}</pre></div>` : '')
+    + (ep && ep.bilet ? `<div class="p-8 page-break"><pre class="whitespace-pre-wrap font-[Inter] text-sm leading-relaxed">${ep.bilet}</pre></div>` : '');
+  if(!printContent){ alert('Generează mai întâi epicriza sau biletul.'); return; }
+  const w = window.open('', '_blank');
+  w.document.write(`<!DOCTYPE html><html lang="ro"><head><meta charset="UTF-8"><title>Documente — ${p.nume} ${p.prenume}</title>
+  <style>body{font-family:Inter,system-ui,sans-serif;color:#0f172a} .page-break{page-break-before:always} pre{font-family:inherit}</style></head>
+  <body>${printContent}</body></html>`);
+  w.document.close(); w.print();
+}
+
+/* ── Helperi ── */
+function todayStr(){ const d=new Date(); return d.toISOString().slice(0,10); }
+function calcVarsta(dataN){
+  const today = new Date(); const bd = new Date(dataN);
+  let age = today.getFullYear() - bd.getFullYear();
+  const m = today.getMonth() - bd.getMonth();
+  if(m < 0 || (m === 0 && today.getDate() < bd.getDate())) age--;
+  return age;
+}
+function initiale(nume,prenume){ return ((nume||'?')[0] + (prenume||'?')[0]).toUpperCase(); }
+function refresh(){
+  renderPacientList();
+  if(currentPacient) renderDetail(); else renderEmptyState();
+}
+
+/* ── Export / Import JSON ── */
+function exportJSON(){
+  const blob = new Blob([JSON.stringify(DB, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'pachet_complet_coloana.json';
+  a.click();
+}
+function importJSON(input){
+  const file = input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      const data = JSON.parse(e.target.result);
+      if(!data.pacienti || !data.internari) throw new Error('fișier invalid');
+      DB = data; save(); refresh();
+      alert('Datele au fost importate cu succes.');
+    }catch(err){ alert('Fișier invalid: ' + err.message); }
+  };
+  reader.readAsText(file);
+}
+
+/* ── Date demonstrative (pentru validare rapidă) ── */
+function seedDemo(){
+  const d = defaultDB();
+  const p1 = { id: d.seq.pacienti++, nume:'Popescu', prenume:'Ion', cnp:'1650315400123', dataNasterii:'1965-03-15', varsta:61, sex:'M', telefon:'0721 000 001', adresa:'București', antecedente:'HTA, diabet tip 2', alergii:'—' };
+  const p2 = { id: d.seq.pacienti++, nume:'Ionescu', prenume:'Maria', cnp:'2720722400456', dataNasterii:'1972-07-22', varsta:54, sex:'F', telefon:'0721 000 002', adresa:'București', antecedente:'Osteoporoza', alergii:'—' };
+  d.pacienti.push(p1, p2);
+  const i1 = { id: d.seq.internari++, idPacient:p1.id, dataInternare:'2026-10-18', tip:'Continuu', diagnosticCod:'M51.2', diagnosticNume:'Hernie de disc lombară', proceduraCod:'80.53', proceduraNume:'Discectomie lombară (minim invaziv)', segment:'L4-L5', nivele:1, motiv:'Durere lombară cu iradiere radiculară dreaptă L5, 6 luni, rezistentă la tratament conservator.' };
+  const i2 = { id: d.seq.internari++, idPacient:p2.id, dataInternare:'2026-10-10', tip:'Continuu', diagnosticCod:'M43.16', diagnosticNume:'Spondilolisteză lombară', proceduraCod:'81.08', proceduraNume:'Fuziune lombară posterioară cu instrumentație', segment:'L4-S1', nivele:2, motiv:'Spondilolisteză grad II cu claudicație neurogenă.' };
+  d.internari.push(i1, i2);
+  DB = d;
+  save(); refresh();
+  alert('Au fost adăugate 2 exemple demonstrative de pacienți internați continuu.');
+}
+
+/* ── Inițializare ── */
+load();
+document.addEventListener('DOMContentLoaded', function(){
+  $('searchPacient').addEventListener('input', ()=>renderPacientList());
+  document.body.addEventListener('click', e => {
+    const card = e.target.closest('.pacient-card');
+    if(card){ currentPacient = parseInt(card.dataset.pid); currentTab = 'internare'; renderDetail(); }
+  });
+  renderPacientList();
+  renderEmptyState();
+  const badge = $('storageBadge');
+  badge.textContent = storageOK ? '✓ local' : '⚠ fără stocare';
+});
+</script>
+</body>
+</html>
